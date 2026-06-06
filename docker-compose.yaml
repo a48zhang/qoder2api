@@ -1,0 +1,13 @@
+services:
+  qoder2api:
+    build: .
+    image: qoder2api:local
+    restart: unless-stopped
+    ports:
+      - "8963:8963"
+    environment:
+      QODER_HOST: 0.0.0.0
+      QODER_PORT: 8963
+      QODER_MODEL: ${QODER_MODEL:-auto}
+      QODER_PAT: ${QODER_PAT:-}
+      QODER_AUTH_JSON: ${QODER_AUTH_JSON:-}

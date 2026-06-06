@@ -1,0 +1,28 @@
+# Build outputs
+/qoder2api
+/qoder2api-go
+/bin/
+/dist/
+/target/
+
+# Local credentials and environment
+.env
+.env.*
+*.env
+*auth*.json
+*credentials*.json
+*token*.json
+
+# Local verification artifacts
+/test.png
+/Snipaste_*.png
+/tmp_*
+*.mitm
+*.pcap
+*.pcapng
+*.log
+
+# OS/editor files
+.DS_Store
+.idea/
+.vscode/
