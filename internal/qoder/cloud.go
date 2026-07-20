@@ -54,6 +54,10 @@ func (b *cloudBackend) Capabilities() Capabilities {
 	return Capabilities{}
 }
 
+func (b *cloudBackend) Models(_ context.Context) ([]ModelInfo, error) {
+	return nil, fmt.Errorf("models listing not supported in PAT mode")
+}
+
 func NewCloudBackend(opts Options, client *http.Client) Backend {
 	return &cloudBackend{
 		baseURL:       strings.TrimRight(opts.BaseURL, "/") + "/api/v1/cloud",

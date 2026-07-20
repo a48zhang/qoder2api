@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -29,7 +31,51 @@ func NewHandler(backend qoder.Backend, defaultModel string) http.Handler {
 	mux.HandleFunc("/v1/chat/completions", h.handleChatCompletions)
 	mux.HandleFunc("/v1/responses", h.handleResponses)
 	mux.HandleFunc("/v1/messages", h.handleAnthropicMessages)
+	mux.HandleFunc("/v1/models", h.handleModels)
 	return mux
+}
+
+func logRequest(r *http.Request, model string) {
+	if model == "" {
+		log.Printf("[q2a] %s %s", r.Method, r.URL.Path)
+		return
+	}
+	log.Printf("[q2a] %s %s model=%s", r.Method, r.URL.Path, model)
+}
+
+func (h *Handler) handleModels(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	logRequest(r, "")
+	models, err := h.backend.Models(r.Context())
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err)
+		return
+	}
+	created := time.Now().Unix()
+	data := make([]map[string]any, 0, len(models))
+	for _, m := range models {
+		id := m.DisplayName
+		if id == "" {
+			id = m.ID
+		}
+		data = append(data, map[string]any{
+			"id":       id,
+			"object":   "model",
+			"created":  created,
+			"owned_by": "qoder",
+		})
+	}
+	sort.Slice(data, func(i, j int) bool {
+		return data[i]["id"].(string) < data[j]["id"].(string)
+	})
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"object": "list",
+		"data":   data,
+	})
 }
 
 func (h *Handler) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
@@ -48,6 +94,7 @@ func (h *Handler) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 	if model == "" {
 		model = h.defaultModel
 	}
+	logRequest(r, model)
 	if len(req.ImageURLs) == 0 {
 		req.ImageURLs = collectImageURLs(req.Messages)
 	}

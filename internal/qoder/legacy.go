@@ -16,12 +16,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"math"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"qoder2api/internal/protocol"
@@ -38,6 +40,10 @@ type legacyBackend struct {
 	client   *http.Client
 	template map[string]any
 	session  legacySession
+
+	modelsMu     sync.Mutex
+	modelsCache  []ModelInfo
+	modelsLoaded bool
 }
 
 type legacyIdentity struct {
@@ -233,6 +239,7 @@ func (b *legacyBackend) completeOnce(ctx context.Context, req CompleteRequest) (
 }
 
 func (b *legacyBackend) Stream(ctx context.Context, req CompleteRequest) (Stream, error) {
+	req.Model = b.resolveModelKey(ctx, req.Model)
 	body, err := b.buildLegacyRequest(req)
 	if err != nil {
 		return nil, err
@@ -286,6 +293,128 @@ func (b *legacyBackend) Stream(ctx context.Context, req CompleteRequest) (Stream
 		resp:   resp,
 		reader: bufio.NewReader(resp.Body),
 	}, nil
+}
+
+// cosySignedRequest 构造一个带 COSY 签名头的请求（签名使用空 body）。
+func (b *legacyBackend) cosySignedRequest(ctx context.Context, method, rawURL, signPath string) (*http.Request, error) {
+	cosyDate := fmt.Sprintf("%d", time.Now().Unix())
+	payloadB64, err := legacyBuildPayloadB64(b.session.Info)
+	if err != nil {
+		return nil, err
+	}
+	sig := legacySignRequest(payloadB64, b.session.CosyKey, cosyDate, "", signPath)
+	req, err := http.NewRequestWithContext(ctx, method, rawURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("cache-control", "no-cache")
+	req.Header.Set("cosy-data-policy", "AGREE")
+	req.Header.Set("accept", "application/json")
+	req.Header.Set("accept-encoding", "identity")
+	req.Header.Set("authorization", "Bearer COSY."+payloadB64+"."+sig)
+	req.Header.Set("content-type", "application/json")
+	req.Header.Set("cosy-clienttype", "5")
+	req.Header.Set("cosy-clientip", "169.254.198.161")
+	req.Header.Set("cosy-date", cosyDate)
+	req.Header.Set("cosy-key", b.session.CosyKey)
+	req.Header.Set("cosy-machineid", b.session.MachineID)
+	req.Header.Set("cosy-machinetoken", b.session.MachineToken)
+	req.Header.Set("cosy-machinetype", b.session.MachineType)
+	req.Header.Set("cosy-user", b.session.Identity.UID)
+	req.Header.Set("cosy-version", legacyCosyVersion)
+	req.Header.Set("login-version", "v2")
+	req.Header.Set("user-agent", "Go-http-client/2.0")
+	return req, nil
+}
+
+// Models 返回聊天桥可用的模型列表（Qoder chat 分组），结果按进程缓存。
+func (b *legacyBackend) Models(ctx context.Context) ([]ModelInfo, error) {
+	return b.loadModels(ctx)
+}
+
+func (b *legacyBackend) loadModels(ctx context.Context) ([]ModelInfo, error) {
+	b.modelsMu.Lock()
+	defer b.modelsMu.Unlock()
+	if b.modelsLoaded {
+		return b.modelsCache, nil
+	}
+	models, err := b.fetchModels(ctx)
+	if err != nil {
+		return nil, err
+	}
+	b.modelsCache = models
+	b.modelsLoaded = true
+	return models, nil
+}
+
+// fetchModels 拉取聊天桥可用模型：chat 分组优先，其后合并 byok
+// （团队/企业自带 key，如 Peach）。按展示名去重，同名以靠前分组为准。
+func (b *legacyBackend) fetchModels(ctx context.Context) ([]ModelInfo, error) {
+	req, err := b.cosySignedRequest(ctx, http.MethodGet,
+		"https://api3.qoder.sh/algo/api/v2/model/list", "/api/v2/model/list")
+	if err != nil {
+		return nil, err
+	}
+	resp, err := b.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		data, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("model list http %d: %s", resp.StatusCode, string(data))
+	}
+
+	type legacyModelEntry struct {
+		Key         string `json:"key"`
+		DisplayName string `json:"display_name"`
+	}
+	var groups map[string][]legacyModelEntry
+	if err := json.NewDecoder(resp.Body).Decode(&groups); err != nil {
+		return nil, err
+	}
+
+	chat := groups["chat"]
+	if len(chat) == 0 {
+		chat = groups["assistant"]
+	}
+	seen := map[string]struct{}{}
+	models := make([]ModelInfo, 0, 24)
+	for _, list := range [][]legacyModelEntry{chat, groups["byok_teams"], groups["byok_enterprise"]} {
+		for _, m := range list {
+			key := strings.TrimSpace(m.Key)
+			name := strings.TrimSpace(m.DisplayName)
+			if key == "" || name == "" {
+				continue
+			}
+			dedup := strings.ToLower(name)
+			if _, ok := seen[dedup]; ok {
+				continue
+			}
+			seen[dedup] = struct{}{}
+			models = append(models, ModelInfo{ID: key, DisplayName: name})
+		}
+	}
+	return models, nil
+}
+
+// resolveModelKey 将客户端传入的模型名（展示名或 key，大小写不敏感）解析为
+// Qoder 内部 key。未命中时退回 normalizeLegacyModelKey 处理 auto/lite/别名。
+func (b *legacyBackend) resolveModelKey(ctx context.Context, model string) string {
+	resolved := normalizeLegacyModelKey(model)
+	if name := strings.TrimSpace(model); name != "" {
+		if models, err := b.loadModels(ctx); err == nil {
+			lower := strings.ToLower(name)
+			for _, m := range models {
+				if strings.ToLower(m.DisplayName) == lower || strings.ToLower(m.ID) == lower {
+					resolved = m.ID
+					break
+				}
+			}
+		}
+	}
+	log.Printf("[q2a] model=%q -> key=%q", model, resolved)
+	return resolved
 }
 
 func (s *legacyStream) Next() (protocol.DeltaEvent, error) {

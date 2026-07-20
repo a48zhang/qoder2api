@@ -46,6 +46,7 @@ func (h *Handler) handleResponses(w http.ResponseWriter, r *http.Request) {
 	if model == "" {
 		model = h.defaultModel
 	}
+	logRequest(r, model)
 
 	ctx := r.Context()
 	if chatReq.Stream {

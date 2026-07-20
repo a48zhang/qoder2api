@@ -33,6 +33,10 @@ func (s *stubBackend) Capabilities() qoder.Capabilities {
 	return s.caps
 }
 
+func (s *stubBackend) Models(context.Context) ([]qoder.ModelInfo, error) {
+	return []qoder.ModelInfo{{ID: "stub-model", DisplayName: "Stub Model"}}, nil
+}
+
 func (s *stubBackend) complete(req qoder.CompleteRequest) (qoder.CompleteResponse, error) {
 	s.completeReqs = append(s.completeReqs, req)
 	return s.completeResp, nil

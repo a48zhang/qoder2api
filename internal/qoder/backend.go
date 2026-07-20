@@ -40,9 +40,16 @@ type Stream interface {
 	Close() error
 }
 
+// ModelInfo 描述一个可用模型，用于 /v1/models 列表返回。
+type ModelInfo struct {
+	ID          string
+	DisplayName string
+}
+
 type Backend interface {
 	Complete(context.Context, CompleteRequest) (CompleteResponse, error)
 	Stream(context.Context, CompleteRequest) (Stream, error)
+	Models(context.Context) ([]ModelInfo, error)
 }
 
 type Capabilities struct {
